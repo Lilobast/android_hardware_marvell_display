@@ -32,7 +32,8 @@ LOCAL_SRC_FILES := \
     HWCDisplayEventMonitor.cpp
 
 LOCAL_SRC_FILES += \
-    HWBaselayComposer.cpp
+    HWBaselayComposer.cpp \
+    HWCTint.cpp
 
 ifeq ($(BOARD_ENABLE_OVERLAY), true)
 LOCAL_SRC_FILES += \

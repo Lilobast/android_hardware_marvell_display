@@ -25,6 +25,7 @@ LOCAL_PATH	:= $(call my-dir)
 
 include $(LOCAL_PATH)/../common.mk
 include $(CLEAR_VARS)
+LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 
 LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps) $(kernel_deps)
 LOCAL_COPY_HEADERS_TO         := $(common_header_export_path)

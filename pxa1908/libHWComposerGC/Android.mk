@@ -18,6 +18,7 @@ include $(LOCAL_PATH)/Android.mk.def
 # hwcomposer.<property>.so
 #
 include $(CLEAR_VARS)
+LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 
 LOCAL_SRC_FILES := \
 	gc_hwc.cpp \

@@ -18,6 +18,7 @@
 #include <errno.h>
 #include "HWBaselayComposer.h"
 #include "HWCTint.h"
+#include "HWCCompat.h"
 #ifdef ENABLE_HWC_GC_PATH
     #include "HWCGCInterface.h"
 #endif
@@ -55,6 +56,7 @@ int HWBaselayComposer::open(const char * name, struct hw_device_t** device)
     }
     else
     {
+        hwc_compat_install();
         hwc_tint_install();
         return hwc_device_open_gc(NULL, name, (struct hw_device_t**)&mHwc);
     }

@@ -22,10 +22,10 @@
 FIXED_ARCH_TYPE              ?=
 
 # Set this variable to Kernel directory.
-KERNEL_DIR                   ?= $(ANDROID_BUILD_TOP)/kernel/
+KERNEL_DIR                   ?= kernel/
 
 # Cross compiler for building kernel module.
-CROSS_COMPILE                ?= $(ANDROID_BUILD_TOP)/prebuilt/linux-x86/toolchain/arm-eabi-4.4.3/bin/arm-eabi-
+CROSS_COMPILE                ?= prebuilt/linux-x86/toolchain/arm-eabi-4.4.3/bin/arm-eabi-
 
 # <ro.hardware> property, which comes from 'Hardware' field of
 # 'cpuinfo' of the device.

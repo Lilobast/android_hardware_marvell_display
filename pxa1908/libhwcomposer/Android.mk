@@ -23,7 +23,6 @@ LOCAL_PATH:= $(call my-dir)
 
 include $(LOCAL_PATH)/../common.mk
 include $(CLEAR_VARS)
-LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 
 BOARD_ENABLE_WFD_OPTIMIZATION ?= true 
 BOARD_ENABLE_OVERLAY ?= false
@@ -118,4 +117,5 @@ endif
 
 LOCAL_MODULE_TAGS := optional
 
+LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 include $(BUILD_SHARED_LIBRARY)

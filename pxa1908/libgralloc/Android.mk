@@ -25,7 +25,6 @@ LOCAL_PATH	:= $(call my-dir)
 
 include $(LOCAL_PATH)/../common.mk
 include $(CLEAR_VARS)
-LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 
 LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps) $(kernel_deps)
 LOCAL_COPY_HEADERS_TO         := $(common_header_export_path)
@@ -57,4 +56,5 @@ LOCAL_C_INCLUDES       := $(common_includes) $(kernel_includes)
 
 LOCAL_MODULE := gralloc.$(TARGET_BOARD_PLATFORM)
 
+LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 include $(BUILD_SHARED_LIBRARY)

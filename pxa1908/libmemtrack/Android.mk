@@ -18,11 +18,11 @@ include $(LOCAL_PATH)/../common.mk
 # HAL module implemenation stored in
 # hw/<POWERS_HARDWARE_MODULE_ID>.<ro.hardware>.so
 include $(CLEAR_VARS)
-LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 
 LOCAL_MODULE_RELATIVE_PATH := hw
 LOCAL_C_INCLUDES += hardware/libhardware/include
 LOCAL_SHARED_LIBRARIES := $(common_libs)
 LOCAL_SRC_FILES := memtrack_mrvl.c
 LOCAL_MODULE := memtrack.$(TARGET_BOARD_PLATFORM)
+LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 include $(BUILD_SHARED_LIBRARY)

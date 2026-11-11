@@ -13,7 +13,6 @@
 # limitations under the License.
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
-LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 
 LOCAL_SRC_FILES := \
     OverlayTest.cpp \
@@ -39,6 +38,7 @@ LOCAL_MODULE := ov_test
 LOCAL_CFLAGS += -DPLATFORM_SDK_VERSION=$(PLATFORM_SDK_VERSION)
 LOCAL_MODULE_TAGS := optional
 
+LOCAL_CFLAGS += -Wno-error  # Pie: legacy Marvell code
 include $(BUILD_EXECUTABLE)
 
 

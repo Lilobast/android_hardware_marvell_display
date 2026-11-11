@@ -260,7 +260,9 @@ extern int gralloc_alloc_framebuffer(alloc_device_t *device, int w, int h, int f
         }
         vaddr += bufferSize;
     }
-    hnd->master = -1;
+    // Pie copies handles (mapper importBuffer -> native_handle_clone) and binder rejects -1
+    // fds: give the framebuffer handle a real second fd.
+    hnd->master = dup(m->framebuffer->fd);
     hnd->base = vaddr;
     hnd->offset = vaddr - m->framebuffer->base;
     *pHandle = (buffer_handle_t)hnd;
@@ -291,6 +293,8 @@ extern int gralloc_free_framebuffer(alloc_device_t *device, buffer_handle_t hand
 
     gc_gralloc_unwrap(hnd);
     close(hnd->fd);
+    if (hnd->master >= 0)
+        close(hnd->master);
     delete hnd;
     return 0;
 }
@@ -301,8 +305,10 @@ extern int gralloc_register_buffer(gralloc_module_t const* module,
     //log_func_entry;
 
     private_handle_t *hnd = (private_handle_t*)handle;
+    // Framebuffer buffers are mapped once in the allocating process (SurfaceFlinger, passthrough
+    // allocator): importing them there is a no-op, anywhere else they are unusable.
     if( hnd->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER )
-        return -EINVAL;
+        return hnd->pid == getpid() ? 0 : -EINVAL;
 
     return gc_gralloc_register_buffer(module, handle);
 
@@ -315,7 +321,7 @@ extern int gralloc_unregister_buffer(gralloc_module_t const* module,
 
     private_handle_t *hnd = (private_handle_t*)handle;
     if( hnd->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER )
-        return -EINVAL;
+        return hnd->pid == getpid() ? 0 : -EINVAL;
 
     return gc_gralloc_unregister_buffer(module, handle);
 }

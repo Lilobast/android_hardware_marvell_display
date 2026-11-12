@@ -123,6 +123,19 @@ static void dump_layer(hwc_layer_1_t const* l) {
             l->displayFrame.bottom);
 }
 
+// Pie's HWC2-on-HWC1 adapter only fills the framebuffer-target handle in set(); Nougat's
+// SurfaceFlinger also passed the last one to prepare(). libHWComposerGC needs it there to
+// learn the display surface, otherwise it composes nothing (every layer stays FRAMEBUFFER).
+// The framebuffer-target buffers are SurfaceFlinger's fixed framebuffer slots, so the last
+// handle stays valid.
+static buffer_handle_t sLastFbTarget[HWC_NUM_PHYSICAL_DISPLAY_TYPES];
+
+static hwc_layer_1_t* fb_target_layer(hwc_display_contents_1_t* d) {
+    if (!d || d->numHwLayers == 0) return NULL;
+    hwc_layer_1_t* l = &d->hwLayers[d->numHwLayers - 1];
+    return l->compositionType == HWC_FRAMEBUFFER_TARGET ? l : NULL;
+}
+
 static int hwc_prepare(hwc_composer_device_1_t *dev, size_t numDisplays, hwc_display_contents_1_t** displays) {
     ATRACE_CALL();
     if (displays) {
@@ -139,8 +152,49 @@ static int hwc_prepare(hwc_composer_device_1_t *dev, size_t numDisplays, hwc_dis
         }
 #endif
 #ifdef ENABLE_HWC_GC_PATH
+        // Debug: setprop debug.hwc.prepare.log N logs the next N frames' layers before
+        // (as requested, skip flag = 1) and after the GC prepare (0 = GLES, 1 = HWC).
+        static int sLogFrames = 0;
+        static int sCheck = 0;
+        if (++sCheck >= 60) {
+            sCheck = 0;
+            int n = property_get_int32("debug.hwc.prepare.log", 0);
+            if (n > 0) {
+                sLogFrames = n;
+                property_set("debug.hwc.prepare.log", "0");
+            }
+        }
+        hwc_display_contents_1_t* d0 = numRestDisplays > 0 ? displays[0] : NULL;
+        bool log = sLogFrames > 0 && d0;
+        uint32_t before[16];
+        size_t nl = d0 ? (d0->numHwLayers < 16 ? d0->numHwLayers : 16) : 0;
+        if (log) {
+            for (size_t i = 0; i < nl; i++)
+                before[i] = (d0->hwLayers[i].compositionType << 8) | (d0->hwLayers[i].flags & 0xff);
+        }
+        hwc_layer_1_t* fbt[HWC_NUM_PHYSICAL_DISPLAY_TYPES] = { NULL };
+        for (size_t i = 0; i < numRestDisplays && i < HWC_NUM_PHYSICAL_DISPLAY_TYPES; i++) {
+            hwc_layer_1_t* t = fb_target_layer(displays[i]);
+            if (t && !t->handle && sLastFbTarget[i]) {
+                t->handle = sLastFbTarget[i];
+                fbt[i] = t;
+            }
+        }
         if(ctx->baseComposer)
             ctx->baseComposer->prepare(&ctx->device, numRestDisplays, displays);
+        for (size_t i = 0; i < HWC_NUM_PHYSICAL_DISPLAY_TYPES; i++) {
+            if (fbt[i]) fbt[i]->handle = NULL;
+        }
+        if (log) {
+            sLogFrames--;
+            ALOGD("prepare: %zu layers, display flags %08x", d0->numHwLayers, d0->flags);
+            for (size_t i = 0; i < nl; i++) {
+                hwc_layer_1_t* l = &d0->hwLayers[i];
+                ALOGD("  layer %zu: in type=%u flags=%02x -> out type=%d flags=%08x fmt=%d",
+                      i, before[i] >> 8, before[i] & 0xff, l->compositionType, l->flags,
+                      l->handle ? ((private_handle_t*)l->handle)->format : -1);
+            }
+        }
 #endif
     }
     return 0;
@@ -159,6 +213,10 @@ static int hwc_set(struct hwc_composer_device_1 *dev,
     }
 #endif
 #ifdef ENABLE_HWC_GC_PATH
+    for (size_t i = 0; i < numDisplays && i < HWC_NUM_PHYSICAL_DISPLAY_TYPES; i++) {
+        hwc_layer_1_t* t = fb_target_layer(displays[i]);
+        if (t && t->handle) sLastFbTarget[i] = t->handle;
+    }
     if(ctx->baseComposer)
     {
         status = ctx->baseComposer->set(&ctx->device, numRestDisplays, displays);

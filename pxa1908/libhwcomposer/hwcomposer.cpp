@@ -1,3 +1,5 @@
+#include <time.h>
+#include <sys/ioctl.h>
 /*
  * Copyright (C) 2016 The CyanogenMod Project
  *               2017 The LineageOS Project
@@ -241,6 +243,56 @@ static int hwc_prepare(hwc_composer_device_1_t *dev, size_t numDisplays, hwc_dis
     return 0;
 }
 
+/*
+ * Flip guard for HWC-only frames. The wrapper double-buffers between the two framebuffers
+ * SurfaceFlinger is not holding, and the mmp driver's pan_display does not wait for the flip
+ * to be latched. When a frame finishes late, the next one started drawing into the buffer still
+ * being scanned out: the top of the screen (status bar) flickered during video. Before composing,
+ * wait for one vsync if the previous flip has not been latched yet.
+ */
+#define FB_IOCTL_WAIT_VSYNC_MRVL _IO('m', 18)
+static int64_t sLastFlipNs = 0;
+
+static int64_t hwc_now_ns()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static int64_t hwc_last_vsync_ns()
+{
+    static int fd = -1;
+    char buf[32];
+    if (fd < 0) fd = open("/sys/class/graphics/fb0/device/vsync_ts", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    return (int64_t)strtoull(buf, NULL, 16);
+}
+
+static bool flip_guard_enabled()
+{
+    char v[PROPERTY_VALUE_MAX];
+    property_get("persist.hwc.flip_guard", v, "1");
+    return v[0] != '0';
+}
+
+static void wait_previous_flip()
+{
+    static int fbFd = -1;
+    if (sLastFlipNs == 0 || !flip_guard_enabled()) return;
+    int64_t vsync = hwc_last_vsync_ns();
+    if (vsync < 0 || vsync >= sLastFlipNs) return;
+    if (hwc_now_ns() - sLastFlipNs > 50000000LL) return;  // vsync events off: long since latched
+    if (fbFd < 0) fbFd = open("/dev/graphics/fb0", O_RDWR | O_CLOEXEC);
+    if (fbFd >= 0) {
+        ATRACE_NAME("hwc_wait_previous_flip");
+        ioctl(fbFd, FB_IOCTL_WAIT_VSYNC_MRVL);
+    }
+}
+
 static int hwc_set(struct hwc_composer_device_1 *dev,
                 size_t numDisplays, hwc_display_contents_1_t** displays)
 {
@@ -259,6 +311,7 @@ static int hwc_set(struct hwc_composer_device_1 *dev,
         if (t && t->handle) sLastFbTarget[i] = t->handle;
     }
     hwc_layer_1_t* t0 = numDisplays > 0 ? fb_target_layer(displays[0]) : NULL;
+    bool rotated = false;
     if (t0 && t0->handle) {
         remember_fb_slot(t0->handle);
         if (fb_rotate_enabled() && sNumFbSlots == MAX_FB_SLOTS && !needs_client_target(displays[0])) {
@@ -271,6 +324,7 @@ static int hwc_set(struct hwc_composer_device_1 *dev,
                         t0->acquireFenceFd = -1;
                     }
                     t0->handle = sFbSlots[i];
+                    rotated = true;
                     break;
                 }
             }
@@ -286,7 +340,9 @@ static int hwc_set(struct hwc_composer_device_1 *dev,
     }
     if(ctx->baseComposer)
     {
+        if (rotated) wait_previous_flip();
         status = ctx->baseComposer->set(&ctx->device, numRestDisplays, displays);
+        if (rotated) sLastFlipNs = hwc_now_ns();
     }
     else
     {

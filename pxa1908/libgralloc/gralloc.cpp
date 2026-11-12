@@ -16,6 +16,7 @@
  */
 
 #include <unistd.h>
+#include <pthread.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -193,6 +194,33 @@ extern int gralloc_device_open(const hw_module_t* module, const char* name,
 
 /*****************************************************************************/
 
+/*
+ * Framebuffer slots are shared by every copy of a framebuffer handle (Pie's mapper imports a clone;
+ * the passthrough allocator then frees its original). Keep a reference per slot: allocation and each
+ * import add one, free and unregister drop one; the slot and its GAL surface go with the last.
+ * Guarded by private_module_t::lock.
+ */
+static int sFbSlotRefs[32];
+
+static int fb_slot(private_module_t *m, private_handle_t *hnd)
+{
+    int slot = (hnd->base - m->framebuffer->base) / (m->finfo.line_length * m->info.yres);
+    return (slot >= 0 && slot < 32) ? slot : -1;
+}
+
+/* Drops one reference; on the last one releases the slot. Call with m->lock held. */
+static void fb_slot_put_locked(private_module_t *m, private_handle_t *hnd)
+{
+    int slot = fb_slot(m, hnd);
+    if (slot < 0)
+        return;
+    if (sFbSlotRefs[slot] > 0 && --sFbSlotRefs[slot] > 0)
+        return;
+    m->bufferMask &= ~(1 << slot);
+    gc_gralloc_unwrap(hnd);
+}
+
+
 extern int gralloc_alloc_framebuffer(alloc_device_t *device, int w, int h, int format, int usage, buffer_handle_t* pHandle, int *pStride)
 {
     //log_func_entry;
@@ -243,6 +271,7 @@ extern int gralloc_alloc_framebuffer(alloc_device_t *device, int w, int h, int f
     {
         /* We ran out of buffers. */
         ALOGE("Out of buffers");
+        pthread_mutex_unlock(&m->lock);
         return -ENOMEM;
     }
 
@@ -265,6 +294,11 @@ extern int gralloc_alloc_framebuffer(alloc_device_t *device, int w, int h, int f
     hnd->master = dup(m->framebuffer->fd);
     hnd->base = vaddr;
     hnd->offset = vaddr - m->framebuffer->base;
+    {
+        int slot = fb_slot(m, hnd);
+        if (slot >= 0)
+            sFbSlotRefs[slot] = 1;
+    }
     *pHandle = (buffer_handle_t)hnd;
 
     pthread_mutex_unlock(&m->lock);
@@ -287,11 +321,10 @@ extern int gralloc_free_framebuffer(alloc_device_t *device, buffer_handle_t hand
     if( private_handle_t::validate(hnd) )
         return -EINVAL;
 
-    module->bufferMask &= ~(1 << (hnd->base - module->framebuffer->base)
-                            / (module->finfo.line_length
-                             * module->info.yres ));
+    pthread_mutex_lock(&module->lock);
+    fb_slot_put_locked(module, hnd);
+    pthread_mutex_unlock(&module->lock);
 
-    gc_gralloc_unwrap(hnd);
     close(hnd->fd);
     if (hnd->master >= 0)
         close(hnd->master);
@@ -308,7 +341,17 @@ extern int gralloc_register_buffer(gralloc_module_t const* module,
     // Framebuffer buffers are mapped once in the allocating process (SurfaceFlinger, passthrough
     // allocator): importing them there is a no-op, anywhere else they are unusable.
     if( hnd->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER )
-        return hnd->pid == getpid() ? 0 : -EINVAL;
+    {
+        private_module_t *m = (private_module_t*)module;
+        if( hnd->pid != getpid() || m->framebuffer == NULL )
+            return -EINVAL;
+        pthread_mutex_lock(&m->lock);
+        int slot = fb_slot(m, hnd);
+        if (slot >= 0)
+            sFbSlotRefs[slot]++;
+        pthread_mutex_unlock(&m->lock);
+        return 0;
+    }
 
     return gc_gralloc_register_buffer(module, handle);
 
@@ -321,7 +364,15 @@ extern int gralloc_unregister_buffer(gralloc_module_t const* module,
 
     private_handle_t *hnd = (private_handle_t*)handle;
     if( hnd->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER )
-        return hnd->pid == getpid() ? 0 : -EINVAL;
+    {
+        private_module_t *m = (private_module_t*)module;
+        if( hnd->pid != getpid() || m->framebuffer == NULL )
+            return -EINVAL;
+        pthread_mutex_lock(&m->lock);
+        fb_slot_put_locked(m, hnd);
+        pthread_mutex_unlock(&m->lock);
+        return 0;
+    }
 
     return gc_gralloc_unregister_buffer(module, handle);
 }

@@ -130,6 +130,37 @@ static void dump_layer(hwc_layer_1_t const* l) {
 // handle stays valid.
 static buffer_handle_t sLastFbTarget[HWC_NUM_PHYSICAL_DISPLAY_TYPES];
 
+// Frames without client composition: SurfaceFlinger keeps handing over the same framebuffer
+// target (the one on screen), so libHWComposerGC blits straight into the scanned-out buffer
+// and the panel shows half-composed frames (tearing). Instead compose into another of
+// SurfaceFlinger's framebuffer slots, never the one on screen nor the one SurfaceFlinger
+// currently holds; the GC posts the handle it composed into. persist.hwc.fb_rotate=0: off.
+#define MAX_FB_SLOTS 3
+static buffer_handle_t sFbSlots[MAX_FB_SLOTS];
+static int sNumFbSlots = 0;
+static buffer_handle_t sShownFb = NULL;
+static int sSetLogFrames = 0;  // set() log budget, armed with debug.hwc.prepare.log
+
+static bool fb_rotate_enabled() {
+    static int sRotate = -1;
+    if (sRotate < 0) sRotate = property_get_bool("persist.hwc.fb_rotate", true) ? 1 : 0;
+    return sRotate == 1;
+}
+
+static void remember_fb_slot(buffer_handle_t h) {
+    for (int i = 0; i < sNumFbSlots; i++)
+        if (sFbSlots[i] == h) return;
+    const private_handle_t* ph = (const private_handle_t*)h;
+    if (sNumFbSlots < MAX_FB_SLOTS && (ph->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER))
+        sFbSlots[sNumFbSlots++] = h;
+}
+
+static bool needs_client_target(hwc_display_contents_1_t* d) {
+    for (size_t i = 0; i + 1 < d->numHwLayers; i++)
+        if (d->hwLayers[i].compositionType == HWC_FRAMEBUFFER) return true;
+    return false;
+}
+
 static hwc_layer_1_t* fb_target_layer(hwc_display_contents_1_t* d) {
     if (!d || d->numHwLayers == 0) return NULL;
     hwc_layer_1_t* l = &d->hwLayers[d->numHwLayers - 1];
@@ -161,6 +192,7 @@ static int hwc_prepare(hwc_composer_device_1_t *dev, size_t numDisplays, hwc_dis
             int n = property_get_int32("debug.hwc.prepare.log", 0);
             if (n > 0) {
                 sLogFrames = n;
+                sSetLogFrames = n;
                 property_set("debug.hwc.prepare.log", "0");
             }
         }
@@ -184,6 +216,15 @@ static int hwc_prepare(hwc_composer_device_1_t *dev, size_t numDisplays, hwc_dis
             ctx->baseComposer->prepare(&ctx->device, numRestDisplays, displays);
         for (size_t i = 0; i < HWC_NUM_PHYSICAL_DISPLAY_TYPES; i++) {
             if (fbt[i]) fbt[i]->handle = NULL;
+        }
+        // Until every framebuffer slot has been seen, let SurfaceFlinger compose with the GPU:
+        // each such frame dequeues the next framebuffer, which set() then remembers.
+        if (fb_rotate_enabled() && sNumFbSlots < MAX_FB_SLOTS && numRestDisplays > 0
+                && displays[0]) {
+            hwc_display_contents_1_t* d = displays[0];
+            for (size_t i = 0; i + 1 < d->numHwLayers; i++)
+                if (d->hwLayers[i].compositionType == HWC_OVERLAY)
+                    d->hwLayers[i].compositionType = HWC_FRAMEBUFFER;
         }
         if (log) {
             sLogFrames--;
@@ -216,6 +257,32 @@ static int hwc_set(struct hwc_composer_device_1 *dev,
     for (size_t i = 0; i < numDisplays && i < HWC_NUM_PHYSICAL_DISPLAY_TYPES; i++) {
         hwc_layer_1_t* t = fb_target_layer(displays[i]);
         if (t && t->handle) sLastFbTarget[i] = t->handle;
+    }
+    hwc_layer_1_t* t0 = numDisplays > 0 ? fb_target_layer(displays[0]) : NULL;
+    if (t0 && t0->handle) {
+        remember_fb_slot(t0->handle);
+        if (fb_rotate_enabled() && sNumFbSlots == MAX_FB_SLOTS && !needs_client_target(displays[0])) {
+            buffer_handle_t sfHeld = t0->handle;
+            for (int i = 0; i < sNumFbSlots; i++) {
+                if (sFbSlots[i] != sfHeld && sFbSlots[i] != sShownFb) {
+                    // The original target was not drawn by the GPU this frame: drop its fence.
+                    if (t0->acquireFenceFd >= 0) {
+                        close(t0->acquireFenceFd);
+                        t0->acquireFenceFd = -1;
+                    }
+                    t0->handle = sFbSlots[i];
+                    break;
+                }
+            }
+        }
+        sShownFb = t0->handle;
+        if (sSetLogFrames > 0) {
+            sSetLogFrames--;
+            const private_handle_t* ph = (const private_handle_t*)t0->handle;
+            ALOGD("set: target %p offset %lld flags %x slots %d client %d",
+                  t0->handle, (long long)ph->offset, ph->flags, sNumFbSlots,
+                  needs_client_target(displays[0]));
+        }
     }
     if(ctx->baseComposer)
     {

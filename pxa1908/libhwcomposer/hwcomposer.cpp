@@ -141,6 +141,11 @@ static buffer_handle_t sLastFbTarget[HWC_NUM_PHYSICAL_DISPLAY_TYPES];
 static buffer_handle_t sFbSlots[MAX_FB_SLOTS];
 static int sNumFbSlots = 0;
 static buffer_handle_t sShownFb = NULL;
+/* The last two distinct framebuffers SurfaceFlinger held. Its BufferQueue hands out free
+ * buffers in release order, so the third slot (held longest ago) is the one it renders into
+ * next time it needs GPU composition. */
+static buffer_handle_t sSfHeldNow = NULL;
+static buffer_handle_t sSfHeldPrev = NULL;
 static int sSetLogFrames = 0;  // set() log budget, armed with debug.hwc.prepare.log
 
 static bool fb_rotate_enabled() {
@@ -314,10 +319,26 @@ static int hwc_set(struct hwc_composer_device_1 *dev,
     bool rotated = false;
     if (t0 && t0->handle) {
         remember_fb_slot(t0->handle);
+        if (t0->handle != sSfHeldNow) {
+            sSfHeldPrev = sSfHeldNow;
+            sSfHeldNow = t0->handle;
+        }
         if (fb_rotate_enabled() && sNumFbSlots == MAX_FB_SLOTS && !needs_client_target(displays[0])) {
             buffer_handle_t sfHeld = t0->handle;
+            /* HWC-only frames rotate between the slot SurfaceFlinger holds and the one it
+             * released last; the slot it will dequeue next for GPU composition is never put on
+             * screen, otherwise its next GPU frame (e.g. the notification shade sliding over a
+             * video) was rendered into the buffer being displayed and the top of the screen
+             * flickered. Falls back to "not held, not shown" until the history is known. */
+            buffer_handle_t sfNext = NULL;
+            if (sSfHeldPrev) {
+                for (int i = 0; i < sNumFbSlots; i++)
+                    if (sFbSlots[i] != sSfHeldNow && sFbSlots[i] != sSfHeldPrev) sfNext = sFbSlots[i];
+            }
             for (int i = 0; i < sNumFbSlots; i++) {
-                if (sFbSlots[i] != sfHeld && sFbSlots[i] != sShownFb) {
+                bool ok = sfNext ? (sFbSlots[i] != sfNext && sFbSlots[i] != sShownFb)
+                                 : (sFbSlots[i] != sfHeld && sFbSlots[i] != sShownFb);
+                if (ok) {
                     // The original target was not drawn by the GPU this frame: drop its fence.
                     if (t0->acquireFenceFd >= 0) {
                         close(t0->acquireFenceFd);

@@ -349,39 +349,6 @@ static void wait_previous_flip()
     }
 }
 
-/*
- * GPU-composed frames: SurfaceFlinger hands over the client target with an acquire fence that
- * signals when the GPU has finished drawing it. The GC blob flips it without waiting, so a
- * frame still being drawn (the Vivante GPU renders in tiles) reached the screen: square gaps
- * from the slot's previous frame over a video's controls. Wait for it first.
- * persist.hwc.wait_target=0 disables it. Every ~10 s the log says how many fences were seen.
- */
-static void wait_client_target(hwc_layer_1_t* t) {
-    static int sEnabled = -1;
-    static int64_t sLastCheck = 0;
-    static int sFrames = 0, sFenced = 0, sPending = 0;
-    int64_t now = hwc_now_ns();
-    if (sEnabled < 0 || now - sLastCheck > 10000000000LL) {
-        if (sEnabled >= 0 && sFrames)
-            ALOGI("client target: %d frames, %d with a fence, %d not yet signalled",
-                  sFrames, sFenced, sPending);
-        sFrames = sFenced = sPending = 0;
-        sLastCheck = now;
-        sEnabled = property_get_bool("persist.hwc.wait_target", true) ? 1 : 0;
-    }
-    if (!t) return;
-    sFrames++;
-    if (t->acquireFenceFd < 0) return;
-    sFenced++;
-    if (sync_wait(t->acquireFenceFd, 0) < 0) {
-        sPending++;
-        if (sEnabled) {
-            ATRACE_NAME("hwc_wait_client_target");
-            sync_wait(t->acquireFenceFd, 100);
-        }
-    }
-}
-
 static int hwc_set(struct hwc_composer_device_1 *dev,
                 size_t numDisplays, hwc_display_contents_1_t** displays)
 {
@@ -445,8 +412,6 @@ static int hwc_set(struct hwc_composer_device_1 *dev,
     }
     if(ctx->baseComposer)
     {
-        if (!rotated && t0 && t0->handle && numDisplays > 0 && needs_client_target(displays[0]))
-            wait_client_target(t0);
         if (rotated) wait_previous_flip();
         status = ctx->baseComposer->set(&ctx->device, numRestDisplays, displays);
         if (rotated) sLastFlipNs = hwc_now_ns();

@@ -176,6 +176,44 @@ static hwc_layer_1_t* fb_target_layer(hwc_display_contents_1_t* d) {
     return l->compositionType == HWC_FRAMEBUFFER_TARGET ? l : NULL;
 }
 
+/*
+ * The GC blob shows black horizontal bands over the status bar while a video plays (NewPipe,
+ * Gallery with the shade pulled): layers it composes around a YUV video layer come out partly
+ * black. Waiting on fences, flips and the 2D engine did not change it; GPU composition does
+ * not have it. So frames that contain a video layer are composed by SurfaceFlinger with GLES.
+ * persist.hwc.gles_video: 0 = never, 1 = frames with a video layer (default), 2 = every frame.
+ */
+static int gles_video_mode() {
+    static int sMode = -1;
+    static int64_t sLastCheck = 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    if (sMode < 0 || now - sLastCheck > 1000000000LL) {
+        sLastCheck = now;
+        sMode = property_get_int32("persist.hwc.gles_video", 1);
+    }
+    return sMode;
+}
+
+static bool is_rgb_format(int f) {
+    return f >= HAL_PIXEL_FORMAT_RGBA_8888 && f <= HAL_PIXEL_FORMAT_BGRA_8888;
+}
+
+static void compose_video_frames_with_gles(hwc_display_contents_1_t* d) {
+    int mode = gles_video_mode();
+    if (mode == 0 || !d || d->numHwLayers < 2) return;
+    bool video = mode == 2;
+    for (size_t i = 0; !video && i + 1 < d->numHwLayers; i++) {
+        const private_handle_t* ph = (const private_handle_t*)d->hwLayers[i].handle;
+        if (ph && !is_rgb_format(ph->format)) video = true;
+    }
+    if (!video) return;
+    for (size_t i = 0; i + 1 < d->numHwLayers; i++)
+        if (d->hwLayers[i].compositionType == HWC_OVERLAY)
+            d->hwLayers[i].compositionType = HWC_FRAMEBUFFER;
+}
+
 static int hwc_prepare(hwc_composer_device_1_t *dev, size_t numDisplays, hwc_display_contents_1_t** displays) {
     ATRACE_CALL();
     if (displays) {
@@ -226,6 +264,7 @@ static int hwc_prepare(hwc_composer_device_1_t *dev, size_t numDisplays, hwc_dis
         for (size_t i = 0; i < HWC_NUM_PHYSICAL_DISPLAY_TYPES; i++) {
             if (fbt[i]) fbt[i]->handle = NULL;
         }
+        if (numRestDisplays > 0) compose_video_frames_with_gles(displays[0]);
         // Until every framebuffer slot has been seen, let SurfaceFlinger compose with the GPU:
         // each such frame dequeues the next framebuffer, which set() then remembers.
         if (fb_rotate_enabled() && sNumFbSlots < MAX_FB_SLOTS && numRestDisplays > 0

@@ -10,6 +10,9 @@
 
 #include <new>
 #include <dlfcn.h>
+#include <stddef.h>
+#include <pthread.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <linux/fb.h>
 #include <sys/ioctl.h>
@@ -47,6 +50,23 @@ typedef int (*gc_commit_fn)(void*, int);
 static ioctl_fn sRealIoctlGc, sRealIoctlGralloc;
 static gc_commit_fn sGcCommit;
 static int sStall = -1;
+static int sLastFlipFence = -1;
+static int sPrevFlipFence = -1;
+static pthread_mutex_t sFenceLock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Userspace copy of the kernel's struct mmp_surface (include/video/mmp_disp.h). */
+struct mmp_surface_user {
+    unsigned short win_u16[10];
+    int pix_fmt;
+    unsigned int pitch[3];
+    unsigned int phys[6];
+    unsigned int hdr_addr[3];
+    unsigned int hdr_size[3];
+    unsigned int flag;
+    int fence_fd;
+    int fd;
+};
+static_assert(offsetof(struct mmp_surface_user, fence_fd) == 88, "mmp_surface layout");
 
 static bool is_fb_flip(int req)
 {
@@ -77,7 +97,30 @@ static int stalled_ioctl(ioctl_fn real, const char* who, int fd, int req, void* 
     if (sStall < 0) sStall = property_get_bool("persist.hwc.flip_stall", true) ? 1 : 0;
     if (sStall && sGcCommit && is_fb_flip(req))
         sGcCommit(NULL, 1);
-    return real(fd, req, arg);
+    int ret = real(fd, req, arg);
+    if (ret == 0 && (unsigned)req == _IO('m', 8) && arg != NULL) {
+        /* FB_IOCTL_FLIP_USR_BUF returns the release fence of the buffer it puts on screen: it
+         * signals when the NEXT flip has replaced that buffer on the panel. HWC-only frames
+         * alternate between two buffers, so the buffer about to be redrawn is the one flipped
+         * two flips ago: keep the last two fences, hwc_set waits on the older one. */
+        int ffd = ((const struct mmp_surface_user*)arg)->fence_fd;
+        int dupfd = ffd >= 0 ? dup(ffd) : -1;
+        pthread_mutex_lock(&sFenceLock);
+        if (sPrevFlipFence >= 0) close(sPrevFlipFence);
+        sPrevFlipFence = sLastFlipFence;
+        sLastFlipFence = dupfd;
+        pthread_mutex_unlock(&sFenceLock);
+    }
+    return ret;
+}
+
+int hwc_take_flip_fence()
+{
+    pthread_mutex_lock(&sFenceLock);
+    int fd = sPrevFlipFence;
+    sPrevFlipFence = -1;
+    pthread_mutex_unlock(&sFenceLock);
+    return fd;
 }
 
 static int gc_ioctl(int fd, int req, ...)

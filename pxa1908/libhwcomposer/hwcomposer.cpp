@@ -1,3 +1,5 @@
+#include "HWCCompat.h"
+#include <sync/sync.h>
 #include <time.h>
 #include <sys/ioctl.h>
 /*
@@ -287,7 +289,17 @@ static bool flip_guard_enabled()
 static void wait_previous_flip()
 {
     static int fbFd = -1;
-    if (sLastFlipNs == 0 || !flip_guard_enabled()) return;
+    if (!flip_guard_enabled()) return;
+    int fence = hwc_take_flip_fence();
+    if (fence >= 0) {
+        /* Release fence of the buffer we are about to redraw: signals once it is no longer
+         * scanned out. */
+        ATRACE_NAME("hwc_wait_flip_fence");
+        sync_wait(fence, 50);
+        close(fence);
+        return;
+    }
+    if (sLastFlipNs == 0) return;
     int64_t vsync = hwc_last_vsync_ns();
     if (vsync < 0 || vsync >= sLastFlipNs) return;
     if (hwc_now_ns() - sLastFlipNs > 50000000LL) return;  // vsync events off: long since latched

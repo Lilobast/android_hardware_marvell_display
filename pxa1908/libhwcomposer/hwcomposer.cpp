@@ -180,8 +180,9 @@ static hwc_layer_1_t* fb_target_layer(hwc_display_contents_1_t* d) {
  * The GC blob shows black horizontal bands over the status bar while a video plays (NewPipe,
  * Gallery with the shade pulled): layers it composes around a YUV video layer come out partly
  * black. Waiting on fences, flips and the 2D engine did not change it; GPU composition does
- * not have it. So frames that contain a video layer are composed by SurfaceFlinger with GLES.
- * persist.hwc.gles_video: 0 = never, 1 = frames with a video layer (default), 2 = every frame.
+ * not have it. The real cause was the 2D engine still writing after the flip (see the flip
+ * stall in HWCCompat.cpp), so this is off by default and kept as a fallback.
+ * persist.hwc.gles_video: 0 = never (default), 1 = frames with a video layer, 2 = every frame.
  */
 static int gles_video_mode() {
     static int sMode = -1;
@@ -191,7 +192,7 @@ static int gles_video_mode() {
     int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
     if (sMode < 0 || now - sLastCheck > 1000000000LL) {
         sLastCheck = now;
-        sMode = property_get_int32("persist.hwc.gles_video", 1);
+        sMode = property_get_int32("persist.hwc.gles_video", 0);
     }
     return sMode;
 }

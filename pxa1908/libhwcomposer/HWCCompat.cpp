@@ -41,14 +41,38 @@ static void* padded_new(size_t size)
  * Flip stall: the blob queues its 2D composition (gco2D_*) and then flips the framebuffer. The
  * Vivante 2D engine runs asynchronously, so a flip could show a frame whose upper layers (the
  * notification shade over a video) were not drawn yet: the top of the screen flickered.
- * Before any framebuffer flip request from the blob or gralloc, commit the 2D queue and wait
- * for it (gcoHAL_Commit(NULL, stall)). persist.hwc.flip_stall=0 disables it;
+ * Before any framebuffer flip request from the blob or gralloc, commit the queues and wait for
+ * them (gcoHAL_Commit(NULL, stall)). gcoHAL_Commit only acts on the thread's CURRENT hardware
+ * type, which is 3D in SurfaceFlinger's thread at flip time, so the 2D engine (used by
+ * libHWComposerGC) kept writing into the buffer already on the (video-mode) panel: black bands
+ * and squares over video. Both engines are stalled now. persist.hwc.flip_stall: 0 = off,
+ * 1 = current engine only, 2 = 3D and 2D (default);
  * debug.hwc.ioctl.log=N logs ioctl requests (N per second, until set back to 0).
  */
 typedef int (*ioctl_fn)(int, int, ...);
 typedef int (*gc_commit_fn)(void*, int);
 static ioctl_fn sRealIoctlGc, sRealIoctlGralloc;
 static gc_commit_fn sGcCommit;
+typedef int (*gc_hwtype_set_fn)(void*, int);
+typedef int (*gc_hwtype_get_fn)(void*, int*);
+static gc_hwtype_set_fn sGcSetType;
+static gc_hwtype_get_fn sGcGetType;
+/* gceHARDWARE_TYPE: 1 = 3D, 2 = 2D. persist.hwc.flip_stall: 0 = off, 1 = current engine only
+ * (old behaviour), 2 = both the 3D and the 2D engine (default). */
+static void stall_engines(int mode)
+{
+    if (mode < 2 || !sGcSetType || !sGcGetType) {
+        sGcCommit(NULL, 1);
+        return;
+    }
+    int cur = 0;
+    sGcGetType(NULL, &cur);
+    static int sLogged = 0;
+    if (sLogged < 3) { sLogged++; ALOGI("flip stall: current hardware type %d", cur); }
+    sGcSetType(NULL, 1); sGcCommit(NULL, 1);
+    sGcSetType(NULL, 2); sGcCommit(NULL, 1);
+    sGcSetType(NULL, cur);
+}
 static int sStall = -1;
 static int sLastFlipFence = -1;
 static int sPrevFlipFence = -1;
@@ -94,9 +118,13 @@ static int stalled_ioctl(ioctl_fn real, const char* who, int fd, int req, void* 
         logLeft--;
         ALOGD("%s ioctl fd %d req %#x%s", who, fd, (unsigned)req, is_fb_flip(req) ? " (flip)" : "");
     }
-    if (sStall < 0) sStall = property_get_bool("persist.hwc.flip_stall", true) ? 1 : 0;
+    static int64_t sStallCheck = 0;
+    if (sStall < 0 || now - sStallCheck > 1000000000LL) {
+        sStallCheck = now;
+        sStall = property_get_int32("persist.hwc.flip_stall", 2);
+    }
     if (sStall && sGcCommit && is_fb_flip(req))
-        sGcCommit(NULL, 1);
+        stall_engines(sStall);
     int ret = real(fd, req, arg);
     if (ret == 0 && (unsigned)req == _IO('m', 8) && arg != NULL) {
         /* FB_IOCTL_FLIP_USR_BUF returns the release fence of the buffer it puts on screen: it
@@ -138,6 +166,8 @@ static int gralloc_ioctl(int fd, int req, ...)
 static void install_flip_stall()
 {
     sGcCommit = (gc_commit_fn)dlsym(RTLD_DEFAULT, "gcoHAL_Commit");
+    sGcSetType = (gc_hwtype_set_fn)dlsym(RTLD_DEFAULT, "gcoHAL_SetHardwareType");
+    sGcGetType = (gc_hwtype_get_fn)dlsym(RTLD_DEFAULT, "gcoHAL_GetHardwareType");
     if (!sGcCommit) {
         ALOGE("gcoHAL_Commit not found: no flip stall");
         return;
